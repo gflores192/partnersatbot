@@ -10,9 +10,10 @@ Para esto se ha realizado un script en R que se alimenta del siguiente query: ht
 Nota: El archivo csv del repositorio es el resultado del query para todo Junio 2020 en PE.
 
 El script se encarga de transformar el output del query a un formato más sencillo en el cual se puede visualizar lo siguiente:
-1. Tiendas
-2. Ordenes entregadas y canceladas por tienda (con acumulado y porcentaje)
-3. Tiempo de dispatching, aceptación, waiting time y preparation time
+1. Tiendas.
+2. Ordenes entregadas y canceladas por tienda (con acumulado y porcentaje).
+3. Tiempo de dispatching, aceptación, waiting time y preparation time.
+4. R2 de cada indicador (delivered, orders, tiempos) en relación a las ongoing orders.
 Todos estos kpis se ven en base al rango de ongoing orders.
 
 El output del script se puede ver en el siguiente reporte (hoja: InfoGroup): https://docs.google.com/spreadsheets/d/1qSCZlqdvhc2M4vxqrzmZ4pO-pcO2eij0L7f3fdTV4BM/edit?ts=5eff5eb9#gid=1755727382
