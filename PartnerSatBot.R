@@ -7,11 +7,12 @@ library(anytime)
 library(hms)
 library(broom)
 library(ggplot2)
+library(googlesheets4)
 #Run query https://glovoapp.eu.looker.com/sql/skpqzkwgd9rqcs and save as 'partnersatbotdata.csv'
 #------------------------------------------------------------------------------------------------
 #Read data
-satdata <- read.table('partnersatbotdata.csv', header = TRUE, sep = ',', stringsAsFactors = FALSE, allowEscapes = TRUE, quote = "\"") #Query info
-hourmin <- read.table('horarios.csv', header = TRUE, sep = ',', stringsAsFactors = FALSE, allowEscapes = TRUE, quote = "\"") #Time info
+satdata <- read.table('C:/Users/Gerardo Flores/Documents/RSupplyOps/PartnerSatBot/partnersatbotdata.csv', header = TRUE, sep = ',', stringsAsFactors = FALSE, allowEscapes = TRUE, quote = "\"") #Query info
+hourmin <- read.table('C:/Users/Gerardo Flores/Documents/RSupplyOps/PartnerSatBot/horarios.csv', header = TRUE, sep = ',', stringsAsFactors = FALSE, allowEscapes = TRUE, quote = "\"") #Time info
 #------------------------------------------------------------------------------------------------
 #All stores
 #satdata %>% group_by(store_address_id) %>% summarise(orders=n_distinct(order_id)) %>% arrange(desc(orders)) %>% summarise(n = n(), orders = sum(orders))
@@ -20,11 +21,21 @@ topstor <- satdata %>%
            group_by(store_address_id) %>% 
            summarise(orders = n_distinct(order_id)) %>% 
            arrange(desc(orders)) %>% 
-           filter(orders >= quantile(orders, 0.975)) %>% #quantile = 0.975
+           filter(orders >= quantile(orders, 0.95)) %>% #quantile = 0.975
            select(store_address_id) %>%
            pull()
+top30 <- satdata %>% 
+         group_by(store_address_id) %>% 
+         summarise(orders = n_distinct(order_id)) %>% 
+         arrange(desc(orders)) %>% 
+         filter(orders >= quantile(orders, 0.95)) %>%
+         top_n(30) %>%
+         select(store_address_id) %>%
+         pull()
 #Check
-#satdata %>% group_by(store_address_id) %>% summarise(orders=n_distinct(order_id)) %>% arrange(desc(orders)) %>% filter(orders >= quantile(orders, 0.975)) %>% summarise(n = n(), orders = sum(orders))
+#satdata %>% group_by(store_address_id) %>% summarise(orders=n_distinct(order_id)) %>% arrange(desc(orders)) %>% filter(orders >= quantile(orders, 0.95)) %>% summarise(n = n(), orders = sum(orders))
+#Distribution
+#satdata %>% group_by(store_address_id) %>% summarise(orders=n_distinct(order_id)) %>% ungroup() %>% group_by(orders) %>% summarise(addresses = n_distinct(store_address_id))
 #------------------------------------------------------------------------------------------------
 #Transform
 satstor <- satdata %>%
@@ -217,9 +228,9 @@ by_said <- tableords %>% group_by(store_address_id)
 r2_del <- do(by_said, glance(lm(delivered ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("delivered" = "r.squared")
 r2_can <- do(by_said, glance(lm(cancels ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("cancels" = "r.squared")
 r2_dis <- do(by_said, glance(lm(avg_min_dispatch ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_dispatch" = "r.squared")
-r2_acc <- do(by_said, glance(lm(avg_min_accept ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_accept" = "r.squared")
+r2_acc <- do(by_said, glance(lm(avg_min_wtp ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_accept" = "r.squared") #QUITAR!!
 r2_wtp <- do(by_said, glance(lm(avg_min_wtp ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_wtp" = "r.squared")
-r2_pre <- do(by_said, glance(lm(avg_min_prep_time ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_prep_time" = "r.squared")
+r2_pre <- do(by_said, glance(lm(avg_min_wtp ~ ongoing_orders, data = .))) %>% select(r.squared) %>% rename("avg_min_prep_time" = "r.squared") #QUITAR!!
 r2 <- r2_del %>%
       left_join(r2_can, by = c("store_address_id" = "store_address_id")) %>%
       left_join(r2_dis, by = c("store_address_id" = "store_address_id")) %>%
@@ -227,6 +238,89 @@ r2 <- r2_del %>%
       left_join(r2_wtp, by = c("store_address_id" = "store_address_id")) %>%
       left_join(r2_pre, by = c("store_address_id" = "store_address_id")) %>%
       pivot_longer(cols = delivered:avg_min_prep_time, names_to = "concept", values_to = "r2")
+#------------------------------------------------------------------------------------------------
+#TOTALS
+totalsto <- kpistore %>% 
+            group_by(store_address_id) %>% 
+            pivot_wider(names_from = concept, values_from = "value") %>%
+            summarise(total_orders = delivered,
+                      total_wtp = delivered*avg_min_wtp,
+                      avg_wtp = avg_min_wtp
+                      )
+#IMPACTS
+threords <- tableords %>% 
+            group_by(store_address_id, store_name) %>%
+            mutate(threshold_dispatch = case_when(as.numeric(avg_min_dispatch) == max(avg_min_dispatch) ~ as.numeric(ongoing_orders)),
+                   threshold_accept = case_when(as.numeric(avg_min_accept) == max(avg_min_accept) ~ as.numeric(ongoing_orders)),
+                   threshold_wtp = case_when(as.numeric(avg_min_wtp) >= 15 ~ as.numeric(ongoing_orders)),
+                   threshold_prep_time = case_when(as.numeric(avg_min_prep_time) >= 30 ~ as.numeric(ongoing_orders))
+                   ) %>%
+            mutate(threshold_dispatch = max(threshold_dispatch, na.rm = TRUE),
+                   threshold_accept = max(threshold_accept, na.rm = TRUE),
+                   threshold_wtp = nth(threshold_wtp, 2, order_by = threshold_wtp, default = min(threshold_wtp, na.rm = TRUE)),
+                   threshold_prep_time = nth(threshold_prep_time, 2, order_by = threshold_prep_time, default = min(threshold_prep_time, na.rm = TRUE))
+                   )
+#Potential lost orders and wtp impact
+disimpac <- threords %>%
+            group_by(store_address_id, store_name) %>%
+            filter(ongoing_orders > max(threshold_dispatch)) %>%
+            group_by(store_address_id, store_name, threshold_dispatch) %>%
+            summarise(lost_orders_dispatch = sum(delivered, na.rm = TRUE),
+                      wtp_impact_dispatch = sum(delivered*avg_min_wtp, na.rm = TRUE)
+                      )  %>%
+            ungroup()
+accimpac <- threords %>%
+            group_by(store_address_id, store_name) %>%
+            filter(ongoing_orders > max(threshold_accept)) %>%
+            group_by(store_address_id, store_name, threshold_accept) %>%
+            summarise(lost_orders_accept = sum(delivered, na.rm = TRUE),
+                      wtp_impact_accept = sum(delivered*avg_min_wtp, na.rm = TRUE)
+                      )  %>%
+            ungroup()
+wtpimpac <- threords %>%
+            group_by(store_address_id, store_name) %>%
+            filter(ongoing_orders > max(threshold_wtp)) %>%
+            group_by(store_address_id, store_name, threshold_wtp) %>%
+            summarise(lost_orders_wtp = sum(delivered, na.rm = TRUE),
+                      wtp_impact_wtp = sum(delivered*avg_min_wtp, na.rm = TRUE)
+                      ) %>%
+            ungroup()
+preimpac <- threords %>%
+            group_by(store_address_id, store_name) %>%
+            filter(ongoing_orders > max(threshold_prep_time)) %>%
+            group_by(store_address_id, store_name, threshold_prep_time) %>%         
+            summarise(lost_orders_prep_time = sum(delivered, na.rm = TRUE),
+                      wtp_impact_prep_time = sum(delivered*avg_min_wtp, na.rm = TRUE)
+                      ) %>%
+            ungroup()
+#Unify impacts
+thresh <- disimpac %>% 
+          left_join(accimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>% 
+          left_join(wtpimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          left_join(preimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          group_by(store_address_id, store_name) %>%
+          select(threshold_dispatch, threshold_accept, threshold_wtp, threshold_prep_time) %>%
+          rename("avg_min_dispatch" = "threshold_dispatch", "avg_min_accept" = "threshold_accept", "avg_min_wtp" = "threshold_wtp", "avg_min_prep_time" = "threshold_prep_time") %>%
+          pivot_longer(cols = c(avg_min_dispatch:avg_min_prep_time), names_to = "concept", values_to = "threshold")
+ordimp <- disimpac %>% 
+          left_join(accimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>% 
+          left_join(wtpimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          left_join(preimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          group_by(store_address_id, store_name) %>%
+          select(lost_orders_dispatch, lost_orders_accept, lost_orders_wtp, lost_orders_prep_time) %>%
+          rename("avg_min_dispatch" = "lost_orders_dispatch", "avg_min_accept" = "lost_orders_accept", "avg_min_wtp" = "lost_orders_wtp", "avg_min_prep_time" = "lost_orders_prep_time") %>%
+          pivot_longer(cols = c(avg_min_dispatch:avg_min_prep_time), names_to = "concept", values_to = "lost_orders")
+wtpimp <- disimpac %>% 
+          left_join(accimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>% 
+          left_join(wtpimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          left_join(preimpac, by = c("store_address_id" = "store_address_id", "store_name" = "store_name")) %>%
+          group_by(store_address_id, store_name) %>%
+          select(wtp_impact_dispatch, wtp_impact_accept, wtp_impact_wtp, wtp_impact_prep_time) %>%
+          rename("avg_min_dispatch" = "wtp_impact_dispatch", "avg_min_accept" = "wtp_impact_accept", "avg_min_wtp" = "wtp_impact_wtp", "avg_min_prep_time" = "wtp_impact_prep_time") %>%
+          pivot_longer(cols = c(avg_min_dispatch:avg_min_prep_time), names_to = "concept", values_to = "wtp_impact")
+impacts <- thresh %>%
+           left_join(ordimp, by = c("store_address_id" = "store_address_id", "store_name" = "store_name", "concept" = "concept")) %>%
+           left_join(wtpimp, by = c("store_address_id" = "store_address_id", "store_name" = "store_name", "concept" = "concept"))
 #------------------------------------------------------------------------------------------------
 #OUTPUTS
 #Hour
@@ -245,8 +339,8 @@ pivotords <- tableords %>%
              inner_join(r2, by = c("store_address_id" = "store_address_id", "concept" = "concept")) %>%
              select(store_address_id:concept, r2, value, everything())
 #Export pivots
-write_csv(pivothour, "satbotpivothour.csv")
-write_csv(pivotords, "satbotpivotords.csv")
+write_sheet(pivothour, ss = "1qSCZlqdvhc2M4vxqrzmZ4pO-pcO2eij0L7f3fdTV4BM", sheet = "InfoHour")
+write_sheet(pivotords, ss = "1qSCZlqdvhc2M4vxqrzmZ4pO-pcO2eij0L7f3fdTV4BM", sheet = "InfoOO")
 #------------------------------------------------------------------------------------------------
 #OUTPUT ONGOING ORDERS GROUPED
 ongordran <- tableords %>% 
@@ -262,7 +356,7 @@ ongordran <- tableords %>%
                                                ongoing_orders>40 & ongoing_orders<=45 ~ "40--45",
                                                ongoing_orders>45 & ongoing_orders<=50 ~ "45--50",
                                                ongoing_orders>50 ~ "50+")
-                                               ) %>%
+                   ) %>%
              group_by(store_address_id, store_name, ongoing_orders) %>%
              summarise(delivered = sum(delivered),
                        cancels = sum(cancels),
@@ -283,7 +377,26 @@ ongordran <- tableords %>%
              left_join(r2, by = c("store_address_id" = "store_address_id", "concept" = "concept")) %>%
              select(store_address_id:concept, r2, value, everything())
 #Export range ongoing orders
-write_csv(ongordran, "ongoingordersrange.csv")
+write_sheet(ongordran, ss = "1qSCZlqdvhc2M4vxqrzmZ4pO-pcO2eij0L7f3fdTV4BM", sheet = "InfoGroup")
+#------------------------------------------------------------------------------------------------
+#Impacts
+finalimp <- impacts %>%
+            left_join(totalsto, by = c("store_address_id" = "store_address_id")) %>%
+            mutate(impact_wtp = (total_wtp-wtp_impact)/(total_orders-lost_orders),
+                   perc_lost = lost_orders/total_orders
+                   ) %>%
+            mutate(suggestion = case_when(perc_lost >= 0.10 ~ "Critical",
+                                          perc_lost >= 0.05 & perc_lost < 0.10 ~ "Follow-up",
+                                          perc_lost >= 0 & perc_lost < 0.05 ~ "Decrease",
+                                          threshold = is.na(threshold) & avg_wtp <= 7.5 ~ "Increase",
+                                          TRUE ~ "Keep"
+                                          )
+                  ) %>%
+            filter(!concept %in% c('avg_min_dispatch','avg_min_accept','avg_min_prep_time')) %>%
+            rename("suggested_threshold" = "threshold", "potential_lost_orders" = "lost_orders", "real_wtp" = "avg_wtp") %>%
+            select(store_address_id:store_name, suggestion, suggested_threshold, potential_lost_orders, perc_lost, impact_wtp, real_wtp)
+#Export pivots
+write_sheet(finalimp, ss = "1qSCZlqdvhc2M4vxqrzmZ4pO-pcO2eij0L7f3fdTV4BM", sheet = "Impacts")
 #------------------------------------------------------------------------------------------------
 #OPTIONAL
 #------------------------------------------------------------------------------------------------
@@ -304,6 +417,7 @@ themeplot <- theme(plot.title = element_text(color = "black", size = 12, face = 
 ##Graph times - ongoing_orders
 onortigg <- tableords %>% 
             select(-c(delivered:cancels)) %>% 
+            filter(store_address_id %in% top30) %>%
             pivot_longer(cols = c(avg_min_dispatch:avg_min_prep_time), names_to = "kpi") %>%
             ggplot(aes(x = ongoing_orders, y = value, col = kpi, group = kpi)) +
             geom_line(show.legend = TRUE) +
@@ -314,7 +428,8 @@ onortigg <- tableords %>%
             themeplot
 ##Graph orders - ongoing_orders
 onororgg <- tableords %>% 
-            select(-c(avg_min_dispatch:avg_min_prep_time)) %>% 
+            select(-c(avg_min_dispatch:avg_min_prep_time)) %>%
+            filter(store_address_id %in% top30) %>%
             pivot_longer(cols = c(delivered:cancels), names_to = "kpi") %>%
             ggplot(aes(x = ongoing_orders, y = value, col = kpi, group = kpi)) +
             geom_line(show.legend = TRUE) +
@@ -323,6 +438,7 @@ onororgg <- tableords %>%
                  x = "Ongoing orders", 
                  y = "value") +
             themeplot
+#Critical <- filter(store_address_id %in% c('93448','124653','137569','185505','41599','41605','53514','60246'))
 ##Scatterplot
 library(car)
 scatterplotMatrix(formula = ~ ongoing_orders + 
